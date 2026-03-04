@@ -1,0 +1,25 @@
+# Virtual environment
+venv/
+bin/
+lib/
+include/
+pyvenv.cfg
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+*.err
+
+# IDE
+.vscode/
+.idea/
+
+# Generated plist (user-specific paths)
+*.plist
