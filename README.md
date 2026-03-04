@@ -8,11 +8,9 @@ Capture and rebind the "Resolution Switch" thumb button on Logitech MX Vertical 
 
 Logitech Options+ software may be banned or you just might not want to install it.
 
-The thumb button emits a processes a proprietary HID++ event that macOS and other tools can't see.
+The MX Vertical's thumb button ("Resolution Switch") cycles DPI settings by default. It emits a Logitech-proprietary HID++ event instead of a standard HID button press, so macOS and tools like Karabiner don't recognize it as a button.
 
-This script injects a "diversion" to force the mouse to output an event and triggers custom actions.
-
-The MX Vertical's thumb button ("Resolution Switch") cycles DPI settings by default.
+This script enables HID++ "diversion" — telling the mouse firmware to send thumb button events to the host instead of handling them internally — then listens for those events and triggers custom actions.
 
 **No Logitech software required.**
 
@@ -26,6 +24,8 @@ The MX Vertical's thumb button ("Resolution Switch") cycles DPI settings by defa
 | ⌘ + thumb button       | ⌘T  (new tab)        |
 | ⌘ + ⇧ + thumb button   | ⌘⇧T (restore tab)    |
 
+Users can modify the on_thumb_button_press() function to change the bindings.
+
 ---
 
 ## Requirements
@@ -35,6 +35,7 @@ The MX Vertical's thumb button ("Resolution Switch") cycles DPI settings by defa
 - **Python 3.9+**
 
 > ⚠️ Bluetooth is not supported—macOS doesn't expose raw HID access over Bluetooth.
+> ⚠️ Not tested on other Logitech mice but the same principles should apply.
 
 ---
 
@@ -46,7 +47,7 @@ logitech-hidpp-rebind/
 ├── requirements.txt
 ├── setup.sh
 ├── rebind_logitech_dpi_button.py
-└── com.user.rebind_logitech_dpi_button.plist
+└── com.user.rebind_logitech_dpi_button.plist (auto-generated)
 ```
 
 ---
@@ -58,7 +59,7 @@ logitech-hidpp-rebind/
 ```bash
 mkdir -p ~/logitech-hidpp-rebind
 cd ~/logitech-hidpp-rebind
-# Place all project files here
+git clone https://github.com/jfakult/Logitech-HIDPP-Thumb-Rebind.git
 ```
 
 ### 2. Run Setup
@@ -78,7 +79,7 @@ Then it builds the plist file for the Launch Agent.
 
 The script sends keystrokes via AppleScript, which requires Accessibility access:
 
-1. When you run the script and hit the thumb button, you'll be prompted to grant permissions to `venv/bin/python3` and Terminal.
+1. When you run the script and hit the thumb button, you'll be prompted to grant permissions to `venv/bin/python3` (and/or Terminal if you run it from there).
 
 > Without this permission, keystrokes will silently fail.
 
@@ -106,17 +107,15 @@ Listening for thumb button events... (Ctrl+C to quit)
 
   Thumb press       → Command+W
   Command + thumb   → Command+T
+  Command + shift + thumb   → Command+Shift+T
+  ...
 ```
 
 Press **Ctrl+C** to stop. Diversion is automatically disabled on exit.
 
 ### Auto-Start at Login
 
-1. **Edit the plist file** — replace `YOUR_USERNAME` with your actual username. Use the correct python path as well (sh: which python)
-   ```xml
-   <string>/Users/YOUR_USERNAME/logitech-hidpp-rebind/venv/bin/python3</string>
-   <string>/Users/YOUR_USERNAME/logitech-hidpp-rebind/rebind_logitech_dpi_button.py</string>
-   ```
+1. Run `./main.sh start`
 
 2. **Install the Launch Agent:**
    ```bash
@@ -131,7 +130,7 @@ Press **Ctrl+C** to stop. Diversion is automatically disabled on exit.
 
 4. **To stop:**
    ```bash
-   launchctl unload ~/Library/LaunchAgents/com.user.rebind_logitech_dpi_button.plist
+   ./main.sh stop
    ```
 
 ---
@@ -152,10 +151,10 @@ Here's what the script does:
 2. **Queries the mouse for its "Special Keys" feature** — this lists all reprogrammable buttons
 3. **Enables diversion for the Resolution Switch button** — the mouse will now send events to us
 4. **Listens for button events** — when pressed, we receive a notification with the button ID
-5. **Triggers actions** — checks if ⌘ is held, then sends keystrokes via AppleScript
+5. **Triggers actions** — sends keystrokes via AppleScript
 6. **Cleans up on exit** — disables diversion so the button returns to normal
 
-### Why Not Karabiner?
+### Why Not Karabiner (or BTT, etc)?
 
 Karabiner intercepts HID events at the driver level. Software-injected keystrokes (CGEventPost, AppleScript, etc.) happen *after* this point, so Karabiner never sees them. There's no way to make Karabiner recognize the thumb button—we have to perform actions directly in Python.
 
@@ -205,9 +204,10 @@ subprocess.run(["osascript", "-e",
 
 ### Keystrokes Not Sent
 
-Run the script manually and press the thumb button. If you don't see any output, the script is not receiving events. (see commands above to run)
+Run the script manually and press the thumb button. If you don't see any output, the script is not receiving events. (see commands above to run manually)
 
 1. **Grant Accessibility permissions** to both `venv/bin/python3` and Terminal
+
 2. **Test AppleScript manually:**
    ```bash
    osascript -e 'tell application "System Events" to keystroke "a"'
@@ -232,12 +232,21 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Multiple Paired Devices
+### It's not working => I have Multiple Paired Devices
 
 If multiple devices are paired to the receiver, edit `DEVICE_INDEX`:
 ```python
 DEVICE_INDEX = 0x01  # First device
 DEVICE_INDEX = 0x02  # Second device
+```
+
+### I have a Logi Bolt receiver
+
+Change UNIFYING_PID in the rebind_logitech_dpi_button.py:
+
+``` python
+UNIFYING_PID = 0xC52B
+BOLT_PID = 0xC548
 ```
 
 ---
