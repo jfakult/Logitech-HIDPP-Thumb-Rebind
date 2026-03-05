@@ -21,7 +21,7 @@ LOGITECH_VID = 0x046D
 UNIFYING_RECIEVER_PID = 0xC52B
 BOLT_PID = 0xC52B
 
-UNIFYING_PID = UNIFYING_RECIEVER_PID. # Change to BOLT_PID to use a BOLT
+UNIFYING_PID = UNIFYING_RECIEVER_PID # Change to BOLT_PID to use a BOLT
 DEVICE_INDEX = 0x01                   # Change to 0x02 if not working and you have more than 1 device connected to your USB receiver
 
 HIDPP_LONG_REPORT = 0x11

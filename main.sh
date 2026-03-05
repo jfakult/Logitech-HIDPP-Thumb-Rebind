@@ -10,6 +10,7 @@ if [ "$1" = "-h" ] || [ "$1" = "--help" ] || [ "$#" -eq 0 ]; then
     echo "  -h, --help    Show this help message and exit"
     echo "  start   Start the service"
     echo "  stop    Kill the service"
+    echo "  status  Check the status of the service"
     exit 0
 fi
 
@@ -32,4 +33,6 @@ elif [ "$1" = "stop" ]; then
     launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/$PLIST_PATH
 
     echo "Done"
+elif [ "$1" = "status" ]; then
+    launchctl print gui/$(id -u)/$PLIST_NAME
 fi
