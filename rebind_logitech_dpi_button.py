@@ -21,8 +21,8 @@ LOGITECH_VID = 0x046D
 UNIFYING_RECIEVER_PID = 0xC52B
 BOLT_PID = 0xC52B
 
-UNIFYING_PID = UNIFYING_RECIEVER_PID # Change to BOLT_PID to use a BOLT
-DEVICE_INDEX = 0x01                   # Change to 0x02 if not working and you have more than 1 device connected to your USB receiver
+UNIFYING_PID = UNIFYING_RECIEVER_PID  # Change to BOLT_PID to use a BOLT
+DEVICE_INDEX = 0x01  # Change to 0x02 if not working and you have more than 1 device connected to your USB receiver
 
 HIDPP_LONG_REPORT = 0x11
 
@@ -65,6 +65,7 @@ def on_thumb_button_press():
 
 # ---- don't update this :) ----
 
+
 def is_command_held():
     """Check if Command key is currently held down"""
     flags = CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState)
@@ -95,7 +96,7 @@ def send_keystroke(key, modifiers):
     script = (
         f'tell application "System Events" to keystroke "{key}" using {{{mod_str}}}'
     )
-    #print(script)
+    # print(script)
     try:
         result = subprocess.run(
             ["osascript", "-e", script], capture_output=True, timeout=5
@@ -108,10 +109,11 @@ def send_keystroke(key, modifiers):
 
 ### HID++ stuff ###
 
-def find_hidpp_interface():
-    """ Figure out which HID++ device interface to use
 
-        0xFF00 , 0x0002 = Logitech Unifying Receiver
+def find_hidpp_interface():
+    """Figure out which HID++ device interface to use
+
+    0xFF00 , 0x0002 = Logitech Unifying Receiver
     """
     for dev in hid.enumerate(LOGITECH_VID, UNIFYING_PID):
         if dev["usage_page"] == 0xFF00 and dev["usage"] == 0x0002:
@@ -121,8 +123,8 @@ def find_hidpp_interface():
 
 def send_hidpp(device, device_idx, feature_idx, func_id, *args):
     """
-        Send HID++ command to device
-        Used to enable/disable diversion for a specific control
+    Send HID++ command to device
+    Used to enable/disable diversion for a specific control
     """
     data = [HIDPP_LONG_REPORT, device_idx, feature_idx, (func_id << 4) | 0x0A] + list(
         args
@@ -139,9 +141,9 @@ def send_hidpp(device, device_idx, feature_idx, func_id, *args):
 
 
 def get_feature_index(device, feature_id):
-    """ Get HID++ feature index for a given feature ID
+    """Get HID++ feature index for a given feature ID
 
-        Example feature ID: 0x1B04 = Special Keys
+    Example feature ID: 0x1B04 = Special Keys
     """
     hi = (feature_id >> 8) & 0xFF
     lo = feature_id & 0xFF
@@ -288,10 +290,25 @@ def main():
                 path = find_hidpp_interface()
                 if path:
                     dev.open_path(path)
-                    enable_diversion(
-                        dev, special_keys_index, RESOLUTION_SWITCH_CID, enable=True
+                    dev.set_nonblocking(True)
+                    response = send_hidpp(
+                        dev,
+                        DEVICE_INDEX,
+                        special_keys_idx,
+                        0x03,
+                        cid_hi,
+                        cid_lo,
+                        0x03,
+                        0x00,
+                        0x00,
+                        0x00,
                     )
-                    print("Reconnected!")
+                    if response:
+                        last_state = True
+                        print("Reconnected!")
+                    else:
+                        print("Failed to re-enable diversion on wake")
+                        last_state = False
                 else:
                     print("Device not found, retrying...")
     except KeyboardInterrupt:
