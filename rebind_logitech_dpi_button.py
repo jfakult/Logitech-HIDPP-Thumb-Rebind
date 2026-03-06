@@ -1,23 +1,56 @@
 #!/usr/bin/env python3
-"""
-HID++ thumb button -> Direct actions via osascript
-"""
-import subprocess
+"""HID++ thumb button -> Direct actions via Quartz CGEvents"""
+
 import time
 
 import hid
 from Quartz import (
-    CGEventSourceCreate,
     CGEventSourceFlagsState,
-    kCGEventFlagMaskAlternate,  # ⌥
-    kCGEventFlagMaskCommand,  # ⌘
-    kCGEventFlagMaskControl,  # ⌃
-    kCGEventFlagMaskShift,  # ⇧
+    kCGEventFlagMaskAlternate,
+    kCGEventFlagMaskCommand,
+    kCGEventFlagMaskControl,
+    kCGEventFlagMaskShift,
     kCGEventSourceStateHIDSystemState,
 )
 
-LOGITECH_VID = 0x046D
+from keyboard import send_keystroke
 
+
+# Update this!
+def on_thumb_button_press():
+    """Handle thumb button press"""
+    cmd = is_command_held()
+    shift = is_shift_held()
+    control = is_control_held()
+
+    if cmd and shift:
+        # Shift + Thumb = Command+Shift+T (restore tab)
+        print("  -> Action: Command+Shift+T (restore tab)")
+        send_keystroke("t", ["command down", "shift down"])
+    elif control and shift:
+        print("  -> Action: Paste")
+        send_keystroke("v", ["command down"])
+    elif control:
+        print("  -> Action: Copy")
+        send_keystroke("c", ["command down"])
+    elif shift:
+        pass
+    elif cmd:
+        # Command + Thumb = Command+T (new tab)
+        print("  -> Action: Command+T (new tab)")
+        send_keystroke("t", ["command down"])
+    else:
+        # Thumb alone = Command+W (close tab)
+        print("  -> Action: Command+W (close tab)")
+        send_keystroke("w", ["command down"])
+
+
+
+###################################
+# ---- don't update below here ----
+###################################
+
+LOGITECH_VID = 0x046D
 UNIFYING_RECIEVER_PID = 0xC52B
 BOLT_PID = 0xC52B
 
@@ -37,33 +70,6 @@ CONTROL_IDS = {
     0x00D7: "Thumb Wheel",
     0x00FD: "Resolution Switch",
 }
-
-
-# Update this!
-def on_thumb_button_press():
-    """Handle thumb button press"""
-    cmd = is_command_held()
-    shift = is_shift_held()
-    option = is_option_held()
-    control = is_control_held()
-
-    if cmd and shift:
-        # Shift + Thumb = Command+Shift+T (restore tab)
-        print("  -> Action: Command+Shift+T (restore tab)")
-        send_keystroke("t", ["command down", "shift down"])
-    elif shift:
-        pass
-    elif cmd:
-        # Command + Thumb = Command+T (new tab)
-        print("  -> Action: Command+T (new tab)")
-        send_keystroke("t", ["command down"])
-    else:
-        # Thumb alone = Command+W (close tab)
-        print("  -> Action: Command+W (close tab)")
-        send_keystroke("w", ["command down"])
-
-
-# ---- don't update this :) ----
 
 
 def is_command_held():
@@ -90,23 +96,6 @@ def is_control_held():
     return bool(flags & kCGEventFlagMaskControl)
 
 
-def send_keystroke(key, modifiers):
-    """Send keystroke via AppleScript. Fails silently if permissions missing."""
-    mod_str = ", ".join(modifiers) if modifiers else ""
-    script = (
-        f'tell application "System Events" to keystroke "{key}" using {{{mod_str}}}'
-    )
-    # print(script)
-    try:
-        result = subprocess.run(
-            ["osascript", "-e", script], capture_output=True, timeout=5
-        )
-        if result.returncode != 0:
-            print(f"[WARN] Keystroke failed: {result.stderr.decode().strip()}")
-    except Exception as e:
-        print(f"[WARN] Keystroke error: {e}")
-
-
 ### HID++ stuff ###
 
 
@@ -122,8 +111,8 @@ def find_hidpp_interface():
 
 
 def send_hidpp(device, device_idx, feature_idx, func_id, *args):
-    """
-    Send HID++ command to device
+    """Send HID++ command to device
+
     Used to enable/disable diversion for a specific control
     """
     data = [HIDPP_LONG_REPORT, device_idx, feature_idx, (func_id << 4) | 0x0A] + list(
@@ -164,7 +153,6 @@ def main():
     dev.open_path(path)
     dev.set_nonblocking(False)
 
-    # === Find Special Keys feature (0x1B04) ===
     print("\n=== Finding Special Keys feature (0x1B04) ===")
     special_keys_idx = get_feature_index(dev, 0x1B04)
 
@@ -175,7 +163,6 @@ def main():
 
     print(f"Special Keys feature at index: {special_keys_idx}")
 
-    # === Get count of controls associated with Special Keys ===
     print("\n=== Querying reprogrammable controls ===")
     response = send_hidpp(dev, DEVICE_INDEX, special_keys_idx, 0x00)
     if not response:
@@ -195,10 +182,8 @@ def main():
         if response:
             cid = (response[4] << 8) | response[5]
             flags = response[8]
-
             name = CONTROL_IDS.get(cid, f"Unknown (0x{cid:04X})")
             divertable = "divertable" if (flags & 0x01) else ""
-
             print(f"  [{i}] CID: 0x{cid:04X} ({name}) flags: {flags:02X} {divertable}")
 
             # Match thumb button by CID, see printout when command runs for more. One could also match by name
@@ -232,16 +217,7 @@ def main():
     cid_hi = (res_switch_cid >> 8) & 0xFF
     cid_lo = res_switch_cid & 0xFF
     response = send_hidpp(
-        dev,
-        DEVICE_INDEX,
-        special_keys_idx,
-        0x03,
-        cid_hi,
-        cid_lo,
-        0x03,
-        0x00,
-        0x00,
-        0x00,
+        dev, DEVICE_INDEX, special_keys_idx, 0x03, cid_hi, cid_lo, 0x03, 0x00, 0x00, 0x00
     )
 
     if response:
@@ -249,16 +225,14 @@ def main():
     else:
         print("Failed to enable diversion")
 
-    # === Listen for diverted button events ===
     print("\n=== Listening for thumb button events ===")
     print("Actions:")
     print("  - Thumb button alone    -> Command+W (close tab)")
-    print("  - Command + Thumb button -> Command+T (new tab)")
-    print("  - Command + Shift + Thumb button -> Command+Shift+T (restore tab)")
+    print("  - Command + Thumb       -> Command+T (new tab)")
+    print("  - Command + Shift + Thumb -> Command+Shift+T (restore tab)")
     print("(Ctrl+C to stop)")
 
     dev.set_nonblocking(True)
-    last_state = False
 
     try:
         while True:
@@ -276,7 +250,7 @@ def main():
                         print(f"  -> {name} (0x{cid:04X}) PRESSED")
                         on_thumb_button_press()
                     elif cid == 0x0000:
-                        print(f"  -> Button RELEASED")
+                        print("  -> Button RELEASED")
                     else:
                         name = CONTROL_IDS.get(cid, "Unknown")
                         print(f"  -> {name} (0x{cid:04X})")
@@ -285,49 +259,28 @@ def main():
                 print(f"[ERROR] Device read failed: {e}")
                 print("Reconnecting in 5 seconds...")
                 time.sleep(5)
-                # Re-open device
                 dev.close()
                 path = find_hidpp_interface()
                 if path:
                     dev.open_path(path)
                     dev.set_nonblocking(True)
                     response = send_hidpp(
-                        dev,
-                        DEVICE_INDEX,
-                        special_keys_idx,
-                        0x03,
-                        cid_hi,
-                        cid_lo,
-                        0x03,
-                        0x00,
-                        0x00,
-                        0x00,
+                        dev, DEVICE_INDEX, special_keys_idx, 0x03,
+                        cid_hi, cid_lo, 0x03, 0x00, 0x00, 0x00
                     )
                     if response:
-                        last_state = True
                         print("Reconnected!")
                     else:
                         print("Failed to re-enable diversion on wake")
-                        last_state = False
                 else:
                     print("Device not found, retrying...")
     except KeyboardInterrupt:
         print("Exiting...")
 
-    # === Disable diversion (cleanup) ===
     print("\n=== Disabling diversion ===")
     dev.set_nonblocking(False)
     send_hidpp(
-        dev,
-        DEVICE_INDEX,
-        special_keys_idx,
-        0x03,
-        cid_hi,
-        cid_lo,
-        0x02,
-        0x00,
-        0x00,
-        0x00,
+        dev, DEVICE_INDEX, special_keys_idx, 0x03, cid_hi, cid_lo, 0x02, 0x00, 0x00, 0x00
     )
 
     dev.close()
