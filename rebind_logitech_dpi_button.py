@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""HID++ thumb button -> Direct actions via Quartz CGEvents"""
+"""HID++ thumb button -> Direct actions via Quartz CGEvents
+
+IMPORTANT: Bluetooth Connection Limitation
+==========================================
+macOS restricts access to Bluetooth HID devices. While this script can detect
+Bluetooth-connected Logitech devices, it cannot open them without the application
+being signed with proper entitlements (specifically, the com.apple.security.device.bluetooth
+entitlement in a signed .app bundle).
+
+For now, use the USB Unifying or Bolt receiver for reliable operation.
+The Bluetooth detection code is kept in place for future compatibility.
+"""
 
 import time
 
@@ -15,12 +26,17 @@ from Quartz import (
 )
 
 
-# Update this!
 def on_thumb_button_press():
     """Handle thumb button press"""
-    cmd = _is_modifier_held(kCGEventFlagMaskCommand)
-    shift = _is_modifier_held(kCGEventFlagMaskShift)
-    control = _is_modifier_held(kCGEventFlagMaskControl)
+    flags = _get_modifier_flags()
+    print(f"  -> Modifier flags: 0x{flags:08X}")
+
+    cmd = bool(flags & kCGEventFlagMaskCommand)
+    shift = bool(flags & kCGEventFlagMaskShift)
+    control = bool(flags & kCGEventFlagMaskControl)
+    option = bool(flags & kCGEventFlagMaskAlternate)
+
+    print(f"  -> cmd={cmd}, shift={shift}, control={control}, option={option}")
 
     if cmd and shift:
         print("  -> Action: Command+Shift+T (restore tab)")
@@ -46,11 +62,21 @@ def on_thumb_button_press():
 # ============================================================================
 
 LOGITECH_VID = 0x046D
-UNIFYING_RECEIVER_PID = 0xC52B
-BOLT_PID = 0xC52B
 
-RECEIVER_PID = UNIFYING_RECEIVER_PID  # Change to BOLT_PID for Bolt receiver
-DEVICE_INDEX = 0x01  # Change to 0x02 if you have multiple devices on receiver
+# USB Receiver PIDs
+UNIFYING_RECEIVER_PID = 0xC52B
+BOLT_RECEIVER_PID = 0xC548
+
+# Direct Bluetooth PIDs (device-specific)
+MX_VERTICAL_BT_PID = 0xB020
+
+# HID++ interface identifiers
+# USB Receiver: usage_page=0xFF00, usage=0x0002
+# Bluetooth: usage_page=0xFF43, usage=0x0202
+HIDPP_USB_USAGE_PAGE = 0xFF00
+HIDPP_USB_USAGE = 0x0002
+HIDPP_BT_USAGE_PAGE = 0xFF43
+HIDPP_BT_USAGE = 0x0202
 
 HIDPP_SHORT_REPORT = 0x10
 HIDPP_LONG_REPORT = 0x11
@@ -87,9 +113,14 @@ CONTROL_IDS = {
 # ============================================================================
 
 
+def _get_modifier_flags():
+    """Get current modifier flags from the HID system."""
+    return CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState)
+
+
 def _is_modifier_held(mask):
     """Check if a modifier key is currently held down."""
-    flags = CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState)
+    flags = _get_modifier_flags()
     return bool(flags & mask)
 
 
@@ -101,11 +132,34 @@ def _is_modifier_held(mask):
 def find_hidpp_interface():
     """Find the HID++ long-message interface path.
 
-    Returns the device path for usage_page=0xFF00, usage=0x0002 (Logitech HID++).
+    Searches for:
+    1. USB Receiver: usage_page=0xFF00, usage=0x0002 (Logitech Unifying/Bolt)
+    2. Bluetooth: usage_page=0xFF43, usage=0x0202 (direct BT connection)
+
+    Returns:
+        tuple: (path, device_index, connection_type) on success
+               device_index is 0x01 for USB receiver, 0xFF for Bluetooth
+        None: if no HID++ interface found
     """
-    for dev in hid.enumerate(LOGITECH_VID, RECEIVER_PID):
-        if dev["usage_page"] == 0xFF00 and dev["usage"] == 0x0002:
-            return dev["path"]
+    # Try USB receivers first (Unifying, Bolt)
+    for pid in [UNIFYING_RECEIVER_PID, BOLT_RECEIVER_PID]:
+        for dev in hid.enumerate(LOGITECH_VID, pid):
+            if (
+                dev["usage_page"] == HIDPP_USB_USAGE_PAGE
+                and dev["usage"] == HIDPP_USB_USAGE
+            ):
+                print(f"Found USB receiver: {dev['product_string']} (PID 0x{pid:04X})")
+                return dev["path"], 0x01, "usb"
+
+    # Try direct Bluetooth connection
+    for dev in hid.enumerate(LOGITECH_VID):
+        if dev["usage_page"] == HIDPP_BT_USAGE_PAGE and dev["usage"] == HIDPP_BT_USAGE:
+            print(
+                f"Found Bluetooth device: {dev['product_string']} (PID 0x{dev['product_id']:04X})"
+            )
+            # For direct Bluetooth, device index is 0xFF (device itself, not through receiver)
+            return dev["path"], 0xFF, "bluetooth"
+
     return None
 
 
@@ -125,22 +179,22 @@ def send_hidpp(device, device_idx, feature_idx, func_id, *args):
     return None
 
 
-def get_feature_index(device, feature_id):
+def get_feature_index(device, device_idx, feature_id):
     """Query the feature index for a given HID++ feature ID."""
     hi, lo = (feature_id >> 8) & 0xFF, feature_id & 0xFF
-    response = send_hidpp(device, DEVICE_INDEX, 0x00, 0x00, hi, lo)
+    response = send_hidpp(device, device_idx, 0x00, 0x00, hi, lo)
     if response and response[2] == 0x00:
         return response[4]
     return None
 
 
-def set_diversion(device, feature_idx, cid, enabled):
+def set_diversion(device, device_idx, feature_idx, cid, enabled):
     """Enable or disable diversion for a control ID."""
     cid_hi, cid_lo = (cid >> 8) & 0xFF, cid & 0xFF
     divert_flags = 0x03 if enabled else 0x02
     return send_hidpp(
         device,
-        DEVICE_INDEX,
+        device_idx,
         feature_idx,
         0x03,
         cid_hi,
@@ -169,24 +223,26 @@ def connect_device():
     """Open and initialize the HID++ device.
 
     Returns:
-        tuple: (device, special_keys_feature_index) on success
+        tuple: (device, device_index, connection_type, special_keys_feature_index) on success
         None: if connection or initialization fails
     """
-    path = find_hidpp_interface()
-    if not path:
+    result = find_hidpp_interface()
+    if not result:
         return None
+
+    path, device_idx, conn_type = result
 
     try:
         dev = hid.device()
         dev.open_path(path)
         dev.set_nonblocking(False)
 
-        feature_idx = get_feature_index(dev, SPECIAL_KEYS_FEATURE_ID)
+        feature_idx = get_feature_index(dev, device_idx, SPECIAL_KEYS_FEATURE_ID)
         if feature_idx is None or feature_idx == 0:
             dev.close()
             return None
 
-        return dev, feature_idx
+        return dev, device_idx, conn_type, feature_idx
     except Exception as e:
         print(f"Connection error: {e}")
         return None
@@ -195,14 +251,18 @@ def connect_device():
 def reconnect_with_backoff(old_feature_idx):
     """Attempt to reconnect with exponential backoff.
 
+    The backoff resets when a device is found (even if initialization fails),
+    since this indicates the hardware is present and we should retry quickly.
+
     Args:
         old_feature_idx: Previous feature index for comparison logging
 
     Returns:
-        tuple: (device, feature_index) on success
+        tuple: (device, device_index, feature_index) on success
         None: if all reconnection attempts fail
     """
-    for attempt in range(RECONNECT_MAX_ATTEMPTS):
+    attempt = 0
+    while attempt < RECONNECT_MAX_ATTEMPTS:
         wait_time = min(2**attempt, RECONNECT_MAX_WAIT_SECONDS)
         print(
             f"Reconnecting in {wait_time}s (attempt {attempt + 1}/{RECONNECT_MAX_ATTEMPTS})..."
@@ -212,17 +272,23 @@ def reconnect_with_backoff(old_feature_idx):
         result = connect_device()
         if not result:
             print("  Device not found, waiting...")
+            attempt += 1
             continue
 
-        dev, feature_idx = result
+        # Device found - reset backoff since hardware is present
+        attempt = 0
+
+        dev, device_idx, conn_type, feature_idx = result
 
         if feature_idx != old_feature_idx:
             print(f"  Feature index changed: {old_feature_idx} -> {feature_idx}")
 
-        if set_diversion(dev, feature_idx, TARGET_CONTROL_CID, enabled=True):
-            print("Reconnected and diversion re-enabled!")
+        if set_diversion(
+            dev, device_idx, feature_idx, TARGET_CONTROL_CID, enabled=True
+        ):
+            print(f"Reconnected via {conn_type} and diversion re-enabled!")
             dev.set_nonblocking(True)
-            return dev, feature_idx
+            return dev, device_idx, feature_idx
 
         print("  Failed to re-enable diversion, retrying...")
         safe_close(dev)
@@ -235,13 +301,13 @@ def reconnect_with_backoff(old_feature_idx):
 # ============================================================================
 
 
-def find_target_control(device, feature_idx):
+def find_target_control(device, device_idx, feature_idx):
     """Find and list all controls, returning the target control if found.
 
     Returns:
         int: Control ID if found, None otherwise
     """
-    response = send_hidpp(device, DEVICE_INDEX, feature_idx, 0x00)
+    response = send_hidpp(device, device_idx, feature_idx, 0x00)
     if not response:
         print("Failed to get control count")
         return None
@@ -250,20 +316,23 @@ def find_target_control(device, feature_idx):
     print(f"Number of controls: {control_count}")
 
     # === List all controls, see if we can find the thumb button ===
-    # Match thumb button by CID, see printout when command runs for more. One could also match by name
+    # Match thumb button by CID, see printout when command runs for more.
+    # One could also match by name.
     """
+    Example output from MX Vertical:
+
     Number of controls: 7
-    [0] CID: 0x0050 (Left Click) flags: 11 divertable
-    [1] CID: 0x0051 (Right Click) flags: 11 divertable
-    [2] CID: 0x0052 (Middle Click) flags: 71 divertable
-    [3] CID: 0x0053 (Back) flags: 71 divertable
-    [4] CID: 0x0056 (Forward) flags: 71 divertable
-    [5] CID: 0x00FD (Resolution Switch) flags: 71 divertable
-    [6] CID: 0x00D7 (Thumb Wheel) flags: A0
+      [0] CID: 0x0050 (Left Click) flags: 11 divertable
+      [1] CID: 0x0051 (Right Click) flags: 11 divertable
+      [2] CID: 0x0052 (Middle Click) flags: 71 divertable
+      [3] CID: 0x0053 (Back) flags: 71 divertable
+      [4] CID: 0x0056 (Forward) flags: 71 divertable
+      [5] CID: 0x00FD (Resolution Switch) flags: 71 divertable  <-- This is the thumb button
+      [6] CID: 0x00D7 (Thumb Wheel) flags: A0
     """
     target_cid = None
     for i in range(control_count):
-        response = send_hidpp(device, DEVICE_INDEX, feature_idx, 0x01, i)
+        response = send_hidpp(device, device_idx, feature_idx, 0x01, i)
         if not response:
             continue
 
@@ -290,13 +359,14 @@ def main():
         print("Could not find HID++ interface!")
         return
 
-    dev, special_keys_idx = result
+    dev, device_idx, conn_type, special_keys_idx = result
 
-    print("\n=== Finding Special Keys feature (0x1B04) ===")
+    print(f"\n=== Connected via {conn_type} ===")
+    print(f"Device index: 0x{device_idx:02X}")
     print(f"Special Keys feature at index: {special_keys_idx}")
 
     print("\n=== Querying reprogrammable controls ===")
-    target_cid = find_target_control(dev, special_keys_idx)
+    target_cid = find_target_control(dev, device_idx, special_keys_idx)
 
     if target_cid is None:
         print(f"\nTarget control (0x{TARGET_CONTROL_CID:04X}) not found!")
@@ -304,11 +374,11 @@ def main():
         return
 
     # === Enable diversion for Resolution Switch ===
-    # (This is the cool part)
-    # AKA: Tell the logitech mouse to send events when the button is pressed
-    # Normally it supresses them until Options+ connects to it and sends it this command
+    # This tells the Logitech mouse to send HID++ events when the button is pressed.
+    # Normally it suppresses them until Logi Options+ connects and sends this command.
+    # By enabling diversion ourselves, we can intercept the button press directly.
     print(f"\n=== Enabling diversion for CID 0x{target_cid:04X} ===")
-    if set_diversion(dev, special_keys_idx, target_cid, enabled=True):
+    if set_diversion(dev, device_idx, special_keys_idx, target_cid, enabled=True):
         print("Diversion enabled!")
     else:
         print("Failed to enable diversion")
@@ -338,9 +408,6 @@ def main():
                     and data[0] == HIDPP_SHORT_REPORT
                     and data[2] == HIDPP_REGISTER_NOTIF_DISCONNECT
                 ):
-                    # Byte 3 = wireless PID low, Byte 4 = flags
-                    # For device connection: flag bit 6 indicates link status
-                    # We'll trigger reconnect on ANY 0x41 event to be safe
                     print("  -> Device disconnect/connect event detected!")
                     raise ConnectionResetError("Device state changed")
 
@@ -375,7 +442,7 @@ def main():
 
                 result = reconnect_with_backoff(special_keys_idx)
                 if result:
-                    dev, special_keys_idx = result
+                    dev, device_idx, special_keys_idx = result
                 else:
                     print("Failed to reconnect. Exiting.")
                     return
@@ -385,7 +452,7 @@ def main():
 
     print("\n=== Disabling diversion ===")
     dev.set_nonblocking(False)
-    set_diversion(dev, special_keys_idx, TARGET_CONTROL_CID, enabled=False)
+    set_diversion(dev, device_idx, special_keys_idx, TARGET_CONTROL_CID, enabled=False)
     dev.close()
     print("Done.")
 

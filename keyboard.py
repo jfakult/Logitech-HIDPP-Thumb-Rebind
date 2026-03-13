@@ -4,17 +4,19 @@ Handles keyboard layout translation to find the correct keycode for any characte
 """
 
 import ctypes
-from ctypes import POINTER, byref, c_uint8, c_uint16, c_uint32, c_void_p
+from ctypes import byref, c_uint16, c_uint32, c_uint8, c_void_p, POINTER
 
 from Quartz import (
     CGEventCreateKeyboardEvent,
     CGEventPost,
     CGEventSetFlags,
     CGEventSourceCreate,
+    CGEventSourceFlagsState,
     kCGEventFlagMaskAlternate,
     kCGEventFlagMaskCommand,
     kCGEventFlagMaskControl,
     kCGEventFlagMaskShift,
+    kCGEventSourceStateHIDSystemState,
     kCGEventSourceStatePrivate,
     kCGHIDEventTap,
 )
@@ -73,7 +75,16 @@ def _get_keycode_for_char(char):
         length = c_uint32(0)
         output = (ctypes.c_wchar * 4)()
         _carbon.UCKeyTranslate(
-            layout, keycode, 0, 0, kbd_type, 1, byref(dead_key), 4, byref(length), output
+            layout,
+            keycode,
+            0,
+            0,
+            kbd_type,
+            1,
+            byref(dead_key),
+            4,
+            byref(length),
+            output,
         )
         if length.value > 0 and output[0].lower() == char.lower():
             return keycode
@@ -82,12 +93,24 @@ def _get_keycode_for_char(char):
     return None
 
 
+# Modifier keycodes and their corresponding flag masks
+MODIFIER_INFO = {
+    "command": (55, kCGEventFlagMaskCommand),
+    "shift": (56, kCGEventFlagMaskShift),
+    "option": (58, kCGEventFlagMaskAlternate),
+    "control": (59, kCGEventFlagMaskControl),
+}
+
+
 def send_keystroke(key, modifiers):
     """Send keystroke via Quartz CGEvents.
 
-    Uses a private event source to set exact modifier flags,
-    ignoring any physically held keys. Looks up the correct keycode
-    for the character on the current keyboard layout.
+    Smart modifier handling:
+    - If a modifier is physically held, we just send the key with flags (no synthetic modifier events)
+    - If a modifier is NOT physically held, we send synthetic modifier down/up events
+
+    This avoids fighting with physically held keys while still properly cleaning up
+    synthetic modifier state.
 
     Args:
         key: Single character or key name (e.g., "v", "t", "return")
@@ -97,24 +120,52 @@ def send_keystroke(key, modifiers):
     if key_code is None:
         return
 
+    # Get current physical modifier state
+    physical_flags = CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState)
+
+    # Parse which modifiers we want
+    wanted_mods = set()
     flags = 0
     for mod in modifiers:
         mod_lower = mod.lower()
         if "command" in mod_lower:
+            wanted_mods.add("command")
             flags |= kCGEventFlagMaskCommand
         if "shift" in mod_lower:
+            wanted_mods.add("shift")
             flags |= kCGEventFlagMaskShift
         if "option" in mod_lower or "alternate" in mod_lower:
+            wanted_mods.add("option")
             flags |= kCGEventFlagMaskAlternate
         if "control" in mod_lower:
+            wanted_mods.add("control")
             flags |= kCGEventFlagMaskControl
 
+    # Determine which modifiers we need to synthesize (not physically held)
+    synthetic_mods = []
+    for mod_name in wanted_mods:
+        keycode, mask = MODIFIER_INFO[mod_name]
+        if not (physical_flags & mask):
+            synthetic_mods.append(mod_name)
+
     source = CGEventSourceCreate(kCGEventSourceStatePrivate)
+
+    # Press only the modifiers that aren't physically held
+    for mod_name in synthetic_mods:
+        keycode, _ = MODIFIER_INFO[mod_name]
+        mod_down = CGEventCreateKeyboardEvent(source, keycode, True)
+        CGEventPost(kCGHIDEventTap, mod_down)
+
+    # Press and release the main key (with flags so apps recognize the combo)
     key_down = CGEventCreateKeyboardEvent(source, key_code, True)
     key_up = CGEventCreateKeyboardEvent(source, key_code, False)
-
     CGEventSetFlags(key_down, flags)
     CGEventSetFlags(key_up, flags)
-
     CGEventPost(kCGHIDEventTap, key_down)
     CGEventPost(kCGHIDEventTap, key_up)
+
+    # Release only the modifiers we synthetically pressed
+    for mod_name in reversed(synthetic_mods):
+        keycode, _ = MODIFIER_INFO[mod_name]
+        mod_up = CGEventCreateKeyboardEvent(source, keycode, False)
+        CGEventPost(kCGHIDEventTap, mod_up)
